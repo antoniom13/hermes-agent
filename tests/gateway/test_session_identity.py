@@ -17,8 +17,10 @@ from gateway.pairing import PairingStore
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.profile_routing import parse_profile_routes
 from gateway.session import SessionSource, build_session_key
+from gateway.platforms.event import MessageEvent
 from gateway.session_identity import (
-    IdentityUnresolved, RoutingIdentity, identity_of, replace_source, resolve_identity,
+    IdentityUnresolved, RoutingIdentity, canonical_identity, identity_of, replace_source,
+    resolve_identity,
 )
 
 
@@ -129,6 +131,49 @@ def test_unresolved_under_multiplex_raises_and_never_means_default(mux, tmp_path
     assert solo.primary._source_session_key(source) == build_session_key(source) == "agent:main:telegram:dm:4040"
     assert source.profile is None  # wire format untouched
     assert solo.runner._authorization_home_for_source(source) is None  # ambient scope, as before
+
+
+@pytest.mark.asyncio
+async def test_removed_explicit_profile_rejects_before_session_or_model_admission(mux, monkeypatch):
+    """A route may match before its named receiver disappears; the real resolver must reject it."""
+    source = mux.primary.build_source(chat_id="72719239", chat_type="dm", user_id="72719239")
+    assert source.profile == "ops"  # Matching occurred while the synthetic profile existed.
+    model_calls = []
+
+    async def unexpected_model_run(*_args, **_kwargs):
+        model_calls.append(True)
+
+    monkeypatch.setattr(mux.runner, "_run_agent", unexpected_model_run)
+    with patch("hermes_cli.profiles.profile_exists", return_value=False):
+        result = await mux.runner._handle_message(MessageEvent(text="synthetic", source=source))
+
+    assert result is None
+    assert identity_of(source) is None
+    assert source.profile_route_rejected is True
+    assert "_sessions" not in mux.runner.__dict__
+    assert model_calls == []
+
+
+def test_explicit_profile_resolver_exception_rejects_before_default_identity(mux):
+    """An exception inside the real profile-home resolver is an ingress rejection."""
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="resolver-failure", profile="ops")
+
+    with patch("hermes_cli.profiles.get_profile_dir", side_effect=RuntimeError("synthetic failure")):
+        assert canonical_identity(source, runner=mux.runner) is None
+
+    assert identity_of(source) is None
+    assert source.profile_route_rejected is True
+
+
+def test_unrouted_default_identity_remains_admitted(mux):
+    """A profile-less primary event preserves the normal default identity."""
+    source = mux.primary.build_source(chat_id="unrouted", chat_type="dm", user_id="unrouted")
+
+    identity = canonical_identity(source, runner=mux.runner)
+
+    assert identity is not None
+    assert (identity.runtime_profile, identity.runtime_home) == ("default", mux.home)
+    assert source.profile is None
 
 
 def test_replace_source_keeps_identity_and_transport_where_dataclasses_replace_drops_them(mux):
