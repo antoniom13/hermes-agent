@@ -260,11 +260,21 @@ def resolve_identity(
         source.profile = routed or adapter_profile
 
     runtime_name = _name(source.profile) or primary_profile
-    # A routed runtime goes through the runner's resolver (missing-profile fallback + warning);
-    # a bot serving its own profile runs where it authorizes.
-    runtime_home = (
-        authorization_home if runtime_name == transport_name
-        else Path(runner._resolve_profile_home_for_source(source)))
+    # The resolver distinguishes an explicit receiver from default routing. It rejects missing
+    # receivers rather than returning its legacy global-home fallback.
+    if runtime_name == transport_name:
+        runtime_home = authorization_home
+    else:
+        try:
+            runtime_home = Path(runner._resolve_profile_home_for_source(source))
+        except ProfileRouteRejected as exc:
+            source.profile_route_rejected = True
+            raise IdentityUnresolved(f"{where}: {exc}") from exc
+        except Exception as exc:
+            source.profile_route_rejected = True
+            raise IdentityUnresolved(
+                f"{where}: explicit profile {runtime_name!r} could not be resolved"
+            ) from exc
     identity = RoutingIdentity(
         transport_profile=transport_name, runtime_profile=runtime_name,
         authorization_home=authorization_home, runtime_home=runtime_home,
