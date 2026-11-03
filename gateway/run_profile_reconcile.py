@@ -46,6 +46,53 @@ def profile_serve_signature(home: Path) -> tuple:
     return tuple(sig)
 
 
+def resolve_profile_home_for_source(runner, source) -> Path:
+    """Resolve the runtime home for *source*, rejecting a failed explicit receiver.
+
+    A profile-less source retains the historical active-profile/global-home fallback. A source
+    naming a receiver must not use that fallback because its identity is already explicit.
+    """
+    from gateway.profile_routing import ProfileRouteRejected
+    from gateway.session_identity import identity_of
+    from hermes_cli.profiles import get_active_profile_name, get_profile_dir, profile_exists
+    from hermes_constants import get_hermes_home
+
+    identity = identity_of(source)
+    if identity is not None:
+        return identity.runtime_home
+    explicit_profile = None
+    try:
+        name = (source.profile or "").strip() or runner._profile_name_for_source(source)
+        explicit_profile = name or None
+        if not name:
+            name = get_active_profile_name() or "default"
+        profile_dir = get_profile_dir(name)
+        if explicit_profile and not profile_exists(name):
+            logger.warning(
+                "Profile %r does not exist for source %s/%s (guild_id=%s), "
+                "rejecting explicit receiver profile",
+                explicit_profile, source.platform.value, source.chat_id,
+                getattr(source, "guild_id", None))
+            raise ProfileRouteRejected(explicit_profile)
+        return profile_dir
+    except ProfileRouteRejected:
+        raise
+    except Exception as exc:
+        if explicit_profile:
+            logger.warning(
+                "Failed to resolve explicit profile %r for source %s/%s (guild_id=%s); "
+                "rejecting receiver",
+                explicit_profile, source.platform.value, source.chat_id,
+                getattr(source, "guild_id", None), exc_info=True)
+            raise ProfileRouteRejected(explicit_profile) from exc
+        logger.warning(
+            "Failed to resolve profile directory for source %s/%s (guild_id=%s), "
+            "falling back to global HERMES_HOME: %s",
+            source.platform.value, source.chat_id, getattr(source, "guild_id", None),
+            explicit_profile or "(no profile)", exc_info=True)
+        return get_hermes_home()
+
+
 class GatewayProfileReconcileMixin:
     """Runtime reconciliation of the multiplexed served-profile set (hot add / unroute / credential-add)."""
 
